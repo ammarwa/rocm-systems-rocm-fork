@@ -417,6 +417,10 @@ ROCPROFILER_ENUM_LABEL(ROCPROFILER_HSA_AMD_EXT_API_ID_hsa_amd_signal_get_event_i
 ROCPROFILER_ENUM_LABEL(ROCPROFILER_HSA_AMD_EXT_API_ID_hsa_amd_external_semaphore_handle_open);
 ROCPROFILER_ENUM_LABEL(ROCPROFILER_HSA_AMD_EXT_API_ID_hsa_amd_external_semaphore_handle_close);
 #    endif
+#    if HSA_AMD_EXT_API_TABLE_STEP_VERSION >= 0x0F
+ROCPROFILER_ENUM_LABEL(ROCPROFILER_HSA_AMD_EXT_API_ID_hsa_amd_image_create_v2);
+ROCPROFILER_ENUM_LABEL(ROCPROFILER_HSA_AMD_EXT_API_ID_hsa_amd_interop_map_buffer_with_size);
+#    endif
 #endif
 
 #if HSA_AMD_EXT_API_TABLE_MAJOR_VERSION == 0x01

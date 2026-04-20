@@ -1312,8 +1312,45 @@ hsa_status_t hsa_amd_interop_map_buffer(uint32_t num_agents, hsa_agent_t* agents
   }
 
   auto ret = core::Runtime::runtime_singleton_->InteropMap(
-      num_agents, core_agents, interop_handle, static_cast<hsa_interop_map_flag_t>(flags), size,
-      ptr, metadata_size, metadata);
+      num_agents, core_agents, interop_handle, static_cast<hsa_interop_map_flag_t>(flags),
+      0, size, ptr, metadata_size, metadata);
+
+  return ret;
+  CATCH;
+}
+
+hsa_status_t hsa_amd_interop_map_buffer_with_size(uint32_t num_agents, hsa_agent_t* agents,
+                                                   hsa_handle_t interop_handle, uint32_t flags,
+                                                   size_t size_hint, size_t* size, void** ptr,
+                                                   size_t* metadata_size, const void** metadata) {
+  static const int tinyArraySize = 8;
+  TRY;
+  IS_OPEN();
+  IS_BAD_PTR(agents);
+  IS_BAD_PTR(size);
+  IS_BAD_PTR(ptr);
+  if (num_agents == 0) return HSA_STATUS_ERROR_INVALID_ARGUMENT;
+
+  core::Agent* short_agents[tinyArraySize];
+  core::Agent** core_agents = short_agents;
+  if (num_agents > tinyArraySize) {
+    core_agents = new core::Agent* [num_agents];
+    if (core_agents == nullptr) return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
+  }
+
+  MAKE_SCOPE_GUARD([&]() {
+    if (num_agents > tinyArraySize) delete[] core_agents;
+  });
+
+  for (uint32_t i = 0; i < num_agents; i++) {
+    core::Agent* device = core::Agent::Convert(agents[i]);
+    IS_VALID(device);
+    core_agents[i] = device;
+  }
+
+  auto ret = core::Runtime::runtime_singleton_->InteropMap(
+      num_agents, core_agents, interop_handle, static_cast<hsa_interop_map_flag_t>(flags),
+      size_hint, size, ptr, metadata_size, metadata);
 
   return ret;
   CATCH;
