@@ -9,6 +9,7 @@
 #include "file.h"
 #include "hipfile.h"
 #include "state.h"
+#include "thread-pool.h"
 
 #include <cstddef>
 #include <memory>
@@ -237,6 +238,39 @@ BatchOperation::isTerminal() const
 }
 
 void
+BatchOperation::run() noexcept
+try {
+    {
+        std::lock_guard<std::mutex> lock{state_mutex};
+        if (std::holds_alternative<Canceled>(state)) {
+            return;
+        }
+        transitionTo(Running{});
+    }
+
+    ssize_t result = 0;
+    if (io_params->opcode == hipFileBatchRead) {
+        result = hipFileRead(io_params->fh, io_params->u.batch.devPtr_base, io_params->u.batch.size,
+                             io_params->u.batch.file_offset, io_params->u.batch.devPtr_offset);
+    }
+    else {
+        result = hipFileWrite(io_params->fh, io_params->u.batch.devPtr_base, io_params->u.batch.size,
+                              io_params->u.batch.file_offset, io_params->u.batch.devPtr_offset);
+    }
+
+    std::lock_guard<std::mutex> lock{state_mutex};
+    if (result >= 0) {
+        transitionTo(Complete{result});
+    }
+    else {
+        transitionTo(Failed{result});
+    }
+}
+catch (...) {
+    recordInternalError();
+}
+
+void
 BatchOperation::recordInternalError()
 {
     std::lock_guard<std::mutex> lock{state_mutex};
@@ -257,7 +291,10 @@ BatchContext::BatchContext(unsigned _capacity) : capacity{_capacity}
         throw std::invalid_argument("Batch capacity is limited to " + std::to_string(MAX_SIZE));
     }
 
+    task_group = Context<IThreadPool>::get()->makeTaskGroup();
 }
+
+BatchContext::~BatchContext() = default;
 
 unsigned
 BatchContext::getCapacity() const noexcept
@@ -272,11 +309,7 @@ BatchContext::submitOperations(const hipFileIOParams_t *params, unsigned num_par
 
     // Check num_params first before doing anything else
     if (num_params > capacity - outstanding_ops.size()) {
-        std::stringstream msg;
-        msg << "Submission exceeds the capacity of this context. Number of ops submitted: ";
-        msg << num_params << ". Context capacity: " << capacity << ". Current outstanding ops: ";
-        msg << outstanding_ops.size();
-        throw std::invalid_argument(msg.str());
+        throw BatchFull();
     }
 
     std::vector<std::shared_ptr<BatchOperation>> pending_ops{};
@@ -300,6 +333,12 @@ BatchContext::submitOperations(const hipFileIOParams_t *params, unsigned num_par
         op->markPending();
     }
     outstanding_ops.insert(pending_ops.begin(), pending_ops.end());
+
+    for (const auto &op : pending_ops) {
+        task_group->run([op]() {
+            op->run();
+        });
+    }
 }
 
 void
