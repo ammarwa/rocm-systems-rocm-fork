@@ -348,27 +348,28 @@ public:
     virtual ~IBatchOperationFactory() = default;
 
     virtual std::shared_ptr<IBatchOperation> create(std::unique_ptr<const hipFileIOParams_t> params,
-                                                    std::shared_ptr<IBuffer> buffer,
-                                                    std::shared_ptr<IFile> file) = 0;
+                                                    std::shared_ptr<IBuffer>                 buffer,
+                                                    std::shared_ptr<IFile>                   file) = 0;
 };
 
 class BatchOperationFactory : public IBatchOperationFactory {
 public:
     std::shared_ptr<IBatchOperation> create(std::unique_ptr<const hipFileIOParams_t> params,
-                                            std::shared_ptr<IBuffer> buffer,
-                                            std::shared_ptr<IFile> file) override;
+                                            std::shared_ptr<IBuffer>                 buffer,
+                                            std::shared_ptr<IFile>                   file) override;
 };
 
 class IBatchContext {
 public:
     static constexpr unsigned MAX_SIZE = 128;
 
-    virtual ~IBatchContext() = default;
-    virtual unsigned getCapacity() const noexcept = 0;
+    virtual ~IBatchContext()                                                                = default;
+    virtual unsigned getCapacity() const noexcept                                          = 0;
     virtual void     submitOperations(const hipFileIOParams_t *params, unsigned num_params,
                                        IBatchOperationFactory *operation_factory = nullptr) = 0;
     virtual void     getStatus(unsigned min_nr, unsigned *nr, hipFileIOEvents_t *iocbp,
-                                struct timespec *timeout)                                  = 0;
+                                struct timespec *timeout)                                   = 0;
+    virtual void     cancelOperations()                                                    = 0;
 };
 
 class BatchContext : public IBatchContext, public std::enable_shared_from_this<BatchContext> {
@@ -402,6 +403,11 @@ public:
     ///
     void getStatus(unsigned min_nr, unsigned *nr, hipFileIOEvents_t *iocbp,
                     struct timespec *timeout) override;
+
+    ///
+    /// @brief Cancel outstanding operations from this Context.
+    ///
+    void cancelOperations() override;
 
 private:
     const unsigned capacity;
