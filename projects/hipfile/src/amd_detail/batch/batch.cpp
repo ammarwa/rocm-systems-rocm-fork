@@ -22,6 +22,113 @@
 
 namespace hipFile {
 
+namespace {
+
+    using batch_operation_state::Canceled;
+    using batch_operation_state::Complete;
+    using batch_operation_state::Failed;
+    using batch_operation_state::Invalid;
+    using batch_operation_state::OperationState;
+    using batch_operation_state::Pending;
+    using batch_operation_state::Running;
+    using batch_operation_state::Timeout;
+    using batch_operation_state::Waiting;
+
+}
+
+InvalidStateTransition::InvalidStateTransition(const char *from, const char *to)
+    : std::logic_error{std::string{"Invalid batch operation state transition: "} + from + " -> " + to}
+{
+}
+
+namespace batch_operation_state {
+
+Pending
+Waiting::transitionTo(const Pending &next) const
+{
+    return next;
+}
+
+Invalid
+Waiting::transitionTo(const Invalid &next) const
+{
+    return next;
+}
+
+Failed
+Waiting::transitionTo(const Failed &next) const
+{
+    return next;
+}
+
+Running
+Pending::transitionTo(const Running &next) const
+{
+    return next;
+}
+
+Canceled
+Pending::transitionTo(const Canceled &next) const
+{
+    return next;
+}
+
+Failed
+Pending::transitionTo(const Failed &next) const
+{
+    return next;
+}
+
+Complete
+Running::transitionTo(const Complete &next) const
+{
+    return next;
+}
+
+Failed
+Running::transitionTo(const Failed &next) const
+{
+    return next;
+}
+
+Timeout
+Running::transitionTo(const Timeout &next) const
+{
+    return next;
+}
+
+Failed
+Complete::transitionTo(const Failed &next) const
+{
+    return next;
+}
+
+Canceled
+Canceled::transitionTo(const Canceled &) const
+{
+    return *this;
+}
+
+Failed
+Invalid::transitionTo(const Failed &next) const
+{
+    return next;
+}
+
+Failed
+Timeout::transitionTo(const Failed &next) const
+{
+    return next;
+}
+
+Failed
+Failed::transitionTo(const Failed &next) const
+{
+    return next;
+}
+
+}
+
 BatchOperation::BatchOperation(std::unique_ptr<const hipFileIOParams_t> params,
                                std::shared_ptr<IBuffer> _buffer, std::shared_ptr<IFile> _file)
     : io_params{std::move(params)}, buffer{_buffer}, file{_file}
@@ -83,6 +190,64 @@ BatchOperation::BatchOperation(std::unique_ptr<const hipFileIOParams_t> params,
     }
 }
 
+template <class Next>
+void
+BatchOperation::transitionTo(Next next)
+{
+    state = std::visit([&next](const auto &current) -> OperationState { return current.transitionTo(next); },
+                       state);
+}
+
+void
+BatchOperation::markPending()
+{
+    std::lock_guard<std::mutex> lock{state_mutex};
+
+    transitionTo(Pending{});
+}
+
+void
+BatchOperation::tryCancel()
+{
+    std::lock_guard<std::mutex> lock{state_mutex};
+
+    try {
+        transitionTo(Canceled{});
+    }
+    catch (const InvalidStateTransition &) {
+    }
+}
+
+hipFileIOEvents_t
+BatchOperation::event() const
+{
+    std::lock_guard<std::mutex> lock{state_mutex};
+    return std::visit(
+        [this](const auto &current) -> hipFileIOEvents_t {
+            return {io_params->cookie, current.toPublic(), static_cast<size_t>(current.eventRet())};
+        },
+        state);
+}
+
+bool
+BatchOperation::isTerminal() const
+{
+    std::lock_guard<std::mutex> lock{state_mutex};
+    return std::visit([](const auto &current) { return current.isTerminalState(); }, state);
+}
+
+void
+BatchOperation::recordInternalError()
+{
+    std::lock_guard<std::mutex> lock{state_mutex};
+
+    if (std::holds_alternative<Canceled>(state)) {
+        return;
+    }
+
+    transitionTo(Failed{-hipFileInternalError});
+}
+
 BatchContext::BatchContext(unsigned _capacity) : capacity{_capacity}
 {
     if (_capacity == 0) {
@@ -91,6 +256,7 @@ BatchContext::BatchContext(unsigned _capacity) : capacity{_capacity}
     if (_capacity > MAX_SIZE) {
         throw std::invalid_argument("Batch capacity is limited to " + std::to_string(MAX_SIZE));
     }
+
 }
 
 unsigned
@@ -130,6 +296,9 @@ BatchContext::submitOperations(const hipFileIOParams_t *params, unsigned num_par
     }
 
     // All submitted operations look valid at this point. Accept them.
+    for (const auto &op : pending_ops) {
+        op->markPending();
+    }
     outstanding_ops.insert(pending_ops.begin(), pending_ops.end());
 }
 

@@ -7,11 +7,14 @@
 
 #include "hipfile.h"
 
+#include <cstddef>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
+#include <variant>
 
 namespace hipFile {
 class IBuffer;
@@ -28,6 +31,232 @@ struct InvalidBatchHandle : public std::invalid_argument {
     }
 };
 
+struct InvalidStateTransition : public std::logic_error {
+    InvalidStateTransition(const char *from, const char *to);
+};
+
+namespace batch_operation_state {
+
+struct Waiting;
+struct Pending;
+struct Running;
+struct Complete;
+struct Canceled;
+struct Invalid;
+struct Timeout;
+struct Failed;
+
+template <class Derived>
+struct StateBase {
+    ssize_t eventRet() const noexcept
+    {
+        return 0;
+    }
+
+    bool isTerminalState() const noexcept
+    {
+        return false;
+    }
+
+    template <class To>
+    [[noreturn]] To transitionTo(const To &to) const
+    {
+        throw InvalidStateTransition{self().name(), to.name()};
+    }
+
+private:
+    const Derived &self() const noexcept
+    {
+        return static_cast<const Derived &>(*this);
+    }
+};
+
+struct Waiting : StateBase<Waiting> {
+    using StateBase<Waiting>::transitionTo;
+
+    const char *name() const noexcept
+    {
+        return "hipFileWaiting";
+    }
+
+    hipFileStatus_t toPublic() const noexcept
+    {
+        return hipFileWaiting;
+    }
+
+    Pending transitionTo(const Pending &next) const;
+    Invalid transitionTo(const Invalid &next) const;
+    Failed  transitionTo(const Failed &next) const;
+};
+
+struct Pending : StateBase<Pending> {
+    using StateBase<Pending>::transitionTo;
+
+    const char *name() const noexcept
+    {
+        return "hipFilePending";
+    }
+
+    hipFileStatus_t toPublic() const noexcept
+    {
+        return hipFilePending;
+    }
+
+    Running  transitionTo(const Running &next) const;
+    Canceled transitionTo(const Canceled &next) const;
+    Failed   transitionTo(const Failed &next) const;
+};
+
+struct Running : StateBase<Running> {
+    using StateBase<Running>::transitionTo;
+
+    const char *name() const noexcept
+    {
+        return "hipFileRunning";
+    }
+
+    hipFileStatus_t toPublic() const noexcept
+    {
+        return hipFilePending;
+    }
+
+    Complete transitionTo(const Complete &next) const;
+    Failed   transitionTo(const Failed &next) const;
+    Timeout  transitionTo(const Timeout &next) const;
+};
+
+struct Complete : StateBase<Complete> {
+    using StateBase<Complete>::transitionTo;
+
+    explicit Complete(ssize_t _ret) : ret{_ret}
+    {
+    }
+
+    const char *name() const noexcept
+    {
+        return "hipFileComplete";
+    }
+
+    hipFileStatus_t toPublic() const noexcept
+    {
+        return hipFileComplete;
+    }
+
+    ssize_t eventRet() const noexcept
+    {
+        return ret;
+    }
+
+    bool isTerminalState() const noexcept
+    {
+        return true;
+    }
+
+    Failed transitionTo(const Failed &next) const;
+
+    ssize_t ret;
+};
+
+struct Canceled : StateBase<Canceled> {
+    using StateBase<Canceled>::transitionTo;
+
+    const char *name() const noexcept
+    {
+        return "hipFileCanceled";
+    }
+
+    hipFileStatus_t toPublic() const noexcept
+    {
+        return hipFileCanceled;
+    }
+
+    bool isTerminalState() const noexcept
+    {
+        return true;
+    }
+
+    Canceled transitionTo(const Canceled &) const;
+};
+
+struct Invalid : StateBase<Invalid> {
+    using StateBase<Invalid>::transitionTo;
+
+    const char *name() const noexcept
+    {
+        return "hipFileInvalid";
+    }
+
+    hipFileStatus_t toPublic() const noexcept
+    {
+        return hipFileInvalid;
+    }
+
+    bool isTerminalState() const noexcept
+    {
+        return true;
+    }
+
+    Failed transitionTo(const Failed &next) const;
+};
+
+struct Timeout : StateBase<Timeout> {
+    using StateBase<Timeout>::transitionTo;
+
+    const char *name() const noexcept
+    {
+        return "hipFileTimeout";
+    }
+
+    hipFileStatus_t toPublic() const noexcept
+    {
+        return hipFileTimeout;
+    }
+
+    bool isTerminalState() const noexcept
+    {
+        return true;
+    }
+
+    Failed transitionTo(const Failed &next) const;
+};
+
+struct Failed : StateBase<Failed> {
+    using StateBase<Failed>::transitionTo;
+
+    explicit Failed(ssize_t _ret) : ret{_ret}
+    {
+    }
+
+    const char *name() const noexcept
+    {
+        return "hipFileFailed";
+    }
+
+    hipFileStatus_t toPublic() const noexcept
+    {
+        return hipFileFailed;
+    }
+
+    ssize_t eventRet() const noexcept
+    {
+        return ret;
+    }
+
+    bool isTerminalState() const noexcept
+    {
+        return true;
+    }
+
+    Failed transitionTo(const Failed &next) const;
+
+    ssize_t ret;
+};
+
+using OperationState =
+    std::variant<Waiting, Pending, Running, Complete, Canceled, Invalid, Timeout, Failed>;
+
+}
+
 /// @brief Represents a single IO Request
 class BatchOperation {
 public:
@@ -37,6 +266,21 @@ public:
     /// @param [in] file File corresponding params->fh
     BatchOperation(std::unique_ptr<const hipFileIOParams_t> params, std::shared_ptr<IBuffer> buffer,
                    std::shared_ptr<IFile> file);
+
+    /// @brief Mark the operation as accepted and ready to run.
+    void markPending();
+
+    /// @brief Cancel the operation if it can be transitioned to Canceled; otherwise no-op.
+    void tryCancel();
+
+    /// @brief Record an internal execution failure on the operation.
+    void recordInternalError();
+
+    /// @brief Return a snapshot of the operation event state.
+    hipFileIOEvents_t event() const;
+
+    /// @brief Return whether the operation has reached a terminal status.
+    bool isTerminal() const;
 
 private:
     /// @brief A copy of the params provided by the application.
@@ -48,6 +292,16 @@ private:
 
     /// @brief A reference to the specified registered File.
     const std::shared_ptr<const IFile> file;
+
+    /// @brief Protects operation state.
+    mutable std::mutex state_mutex;
+
+    /// @brief Current operation state.
+    batch_operation_state::OperationState state{batch_operation_state::Waiting{}};
+
+    /// @brief Move to the next operation state. Caller must hold state_mutex.
+    template <class Next>
+    void transitionTo(Next next);
 };
 
 class IBatchContext {

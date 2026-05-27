@@ -77,6 +77,145 @@ TEST_F(HipFileBatch, CreateOperationWrite)
     BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
 }
 
+TEST_F(HipFileBatch, CreateOperationStartsWaiting)
+{
+    BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
+
+    hipFileIOEvents_t event = op.event();
+    ASSERT_EQ(event.status, hipFileWaiting);
+    ASSERT_EQ(event.ret, 0u);
+}
+
+TEST_F(HipFileBatch, MarkOperationPending)
+{
+    BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
+
+    op.markPending();
+
+    ASSERT_EQ(op.event().status, hipFilePending);
+}
+
+TEST_F(HipFileBatch, TryCancelWaitingOperationIsNoOp)
+{
+    BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
+
+    op.tryCancel();
+
+    ASSERT_EQ(op.event().status, hipFileWaiting);
+}
+
+TEST_F(HipFileBatch, MarkPendingPendingOperationThrowsInvalidStateTransition)
+{
+    BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
+
+    op.markPending();
+
+    ASSERT_THROW(op.markPending(), InvalidStateTransition);
+    ASSERT_EQ(op.event().status, hipFilePending);
+}
+
+TEST_F(HipFileBatch, CancelPendingOperation)
+{
+    BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
+
+    op.markPending();
+    op.tryCancel();
+
+    ASSERT_EQ(op.event().status, hipFileCanceled);
+}
+
+TEST_F(HipFileBatch, CancelPendingOperationIsIdempotent)
+{
+    BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
+
+    op.markPending();
+    op.tryCancel();
+    op.tryCancel();
+
+    ASSERT_EQ(op.event().status, hipFileCanceled);
+}
+
+TEST_F(HipFileBatch, MarkPendingCanceledOperationThrowsInvalidStateTransition)
+{
+    BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
+
+    op.markPending();
+    op.tryCancel();
+
+    ASSERT_THROW(op.markPending(), InvalidStateTransition);
+    ASSERT_EQ(op.event().status, hipFileCanceled);
+}
+
+TEST_F(HipFileBatch, CanceledOperationEventPreservesCookie)
+{
+    int cookie{};
+    io_params->cookie = &cookie;
+    BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
+
+    op.markPending();
+    op.tryCancel();
+
+    hipFileIOEvents_t event = op.event();
+    ASSERT_EQ(event.cookie, &cookie);
+    ASSERT_EQ(event.status, hipFileCanceled);
+}
+
+TEST_F(HipFileBatch, OperationEventStartsWaiting)
+{
+    int cookie{};
+    io_params->cookie = &cookie;
+    BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
+
+    hipFileIOEvents_t event = op.event();
+
+    ASSERT_EQ(event.cookie, &cookie);
+    ASSERT_EQ(event.status, hipFileWaiting);
+    ASSERT_EQ(event.ret, 0);
+}
+
+TEST_F(HipFileBatch, OperationEventUsesCopiedCookie)
+{
+    int               original_cookie{};
+    int               modified_cookie{};
+    hipFileIOParams_t source_params = *io_params;
+    source_params.cookie            = &original_cookie;
+
+    auto           params = std::make_unique<const hipFileIOParams_t>(source_params);
+    BatchOperation op     = BatchOperation{std::move(params), default_mock_buffer, default_mock_file};
+    source_params.cookie  = &modified_cookie;
+
+    ASSERT_EQ(op.event().cookie, &original_cookie);
+}
+
+TEST_F(HipFileBatch, OperationEventReportsPendingStatus)
+{
+    int cookie{};
+    io_params->cookie = &cookie;
+    BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
+
+    op.markPending();
+
+    hipFileIOEvents_t event = op.event();
+    ASSERT_EQ(event.cookie, &cookie);
+    ASSERT_EQ(event.status, hipFilePending);
+    ASSERT_EQ(event.ret, 0);
+}
+
+TEST_F(HipFileBatch, OperationEventReportsCanceledStatus)
+{
+    int cookie{};
+    io_params->cookie = &cookie;
+    BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
+
+    op.markPending();
+    op.tryCancel();
+
+    hipFileIOEvents_t event = op.event();
+    ASSERT_EQ(event.cookie, &cookie);
+    ASSERT_EQ(event.status, hipFileCanceled);
+    ASSERT_EQ(event.ret, 0);
+}
+
 TEST_F(HipFileBatch, CreateOperationBadBuffer)
 {
     EXPECT_CALL(*default_mock_buffer, getBuffer).WillOnce(Return(reinterpret_cast<void *>(0xFACEFEED)));
