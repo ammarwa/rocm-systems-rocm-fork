@@ -72,6 +72,7 @@
 #include "library_info_tester.hpp"
 #include "fence_ordering_tester.hpp"
 #include "tile_rma_tester.hpp"
+#include "host_team_sync_barrier_tester.hpp"
 
 #include "backend_bc.hpp"
 extern Backend* backend;
@@ -706,6 +707,9 @@ std::vector<Tester*> Tester::create(TesterArguments args) {
     case TileGetArbitraryTestType:
       test_name = "Tile Get Arbitrary Strides";
       testers.push_back(new TileRMATester(args));
+    case HostTeamSyncBarrierTestType:
+      test_name = "Host Team Sync/Barrier";
+      testers.push_back(new HostTeamSyncBarrierTester(args));
       break;
     default:
       test_name = "Empty";
