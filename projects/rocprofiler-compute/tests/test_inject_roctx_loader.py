@@ -1,9 +1,10 @@
 # Copyright (c) Advanced Micro Devices, Inc.
 # SPDX-License-Identifier:  MIT
 
-"""Unit tests for utils.inject_roctx_loader. No GPU. CMake build is end-to-end
-in test_torch_trace_coverage; this file stubs the loader to pin contracts:
-tier order, cache fingerprint, REBUILD env var, no-ninja policy.
+"""Unit tests for utils.inject_roctx._backends._torch_cpp_loader. No GPU.
+CMake build is end-to-end in test_torch_trace_coverage; this file stubs the
+loader to pin contracts: tier order, cache fingerprint, REBUILD env var,
+no-ninja policy.
 """
 
 import importlib
@@ -12,7 +13,7 @@ import sys
 import common  # noqa: F401  -- adds src/ to sys.path
 import pytest
 
-from utils import inject_roctx_loader
+from utils.inject_roctx._backends import _torch_cpp_loader as inject_roctx_loader
 
 
 @pytest.fixture(autouse=True)
@@ -142,7 +143,8 @@ def test_cmake_and_runtime_compute_identical_fingerprint():
     snippet = (
         "import sys, pathlib; "
         f"sys.path.insert(0, str(pathlib.Path('{cmake_dir}/../..').resolve())); "
-        "from utils.inject_roctx_loader import _source_fingerprint; "
+        "from utils.inject_roctx._backends._torch_cpp_loader "
+        "import _source_fingerprint; "
         "print(_source_fingerprint())"
     )
     result = subprocess.run(

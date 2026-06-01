@@ -29,7 +29,9 @@ except Exception:
     torch = None
 
 try:
-    from utils import inject_roctx_loader  # noqa: E402
+    from utils.inject_roctx._backends import (  # noqa: E402
+        _torch_cpp_loader as inject_roctx_loader,
+    )
 except Exception:
     inject_roctx_loader = None
 
@@ -80,7 +82,9 @@ def test_random_operator_kernel_coverage(
         write_coverage_workload_artifacts,
     )
 
-    from utils import inject_roctx_loader
+    from utils.inject_roctx._backends import (
+        _torch_cpp_loader as inject_roctx_loader,
+    )
 
     seed, sample_budget = torch_trace_coverage_sampling
     rng = random.Random(seed)
@@ -272,7 +276,7 @@ def test_random_operator_kernel_coverage(
                 "workload subprocess: no aten:0 / aten.nested:0 / "
                 "autograd.engine:0 / autograd.bwd:0 sentinels. PASS "
                 "count above only proves markers + kernel correlation. "
-                "See [torch trace loader]/[torch trace] WARNINGs for "
+                "See [torch trace loader]/[api trace] WARNINGs for "
                 "the cause.",
                 UserWarning,
                 stacklevel=1,
