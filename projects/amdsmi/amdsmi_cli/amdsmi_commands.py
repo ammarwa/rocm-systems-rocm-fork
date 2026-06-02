@@ -8393,7 +8393,7 @@ class AMDSMICommands:
             args.ptl_format = ptl_format
         if mem_carveout is not None:
             args.mem_carveout = mem_carveout
-        if compute_partition_mem_alloc_mode:
+        if compute_partition_mem_alloc_mode is not None:
             args.compute_partition_mem_alloc_mode = compute_partition_mem_alloc_mode
 
         # Handle No GPU passed
@@ -8822,13 +8822,22 @@ class AMDSMICommands:
                 self.logger.print_output()
                 self.logger.clear_multiple_devices_output()
                 return
-            if getattr(args, "compute_partition_mem_alloc_mode", None):
+            if args.compute_partition_mem_alloc_mode:
                 try:
                     mode = amdsmi_interface.AmdSmiComputePartitionMemAllocModeType[
                         args.compute_partition_mem_alloc_mode
                     ]
                     amdsmi_interface.amdsmi_set_gpu_compute_partition_mem_alloc_mode(args.gpu, mode)
                     out = f"Successfully set compute partition memory allocation mode to {args.compute_partition_mem_alloc_mode}"
+                except KeyError:
+                    out = (
+                        "Invalid compute partition memory allocation mode "
+                        f"{args.compute_partition_mem_alloc_mode}"
+                    )
+                    self.logger.store_output(args.gpu, "compute_partition_mem_alloc_mode", out)
+                    self.logger.print_output()
+                    self.logger.clear_multiple_devices_output()
+                    return
                 except amdsmi_exception.AmdSmiLibraryException as e:
                     out = f"[{e.get_error_info(detailed=False)}] Unable to set compute partition memory allocation mode to {args.compute_partition_mem_alloc_mode}"
                     if e.get_error_code() == amdsmi_interface.amdsmi_wrapper.AMDSMI_STATUS_NO_PERM:
@@ -9577,7 +9586,7 @@ class AMDSMICommands:
                         args.perf_determinism is not None,
                         args.compute_partition is not None,
                         args.memory_partition is not None,
-                        getattr(args, "compute_partition_mem_alloc_mode", None) is not None,
+                        args.compute_partition_mem_alloc_mode is not None,
                         args.power_cap is not None,
                         args.soc_pstate is not None,
                         args.xgmi_plpd is not None,
