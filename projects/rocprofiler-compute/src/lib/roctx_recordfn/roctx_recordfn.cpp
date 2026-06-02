@@ -402,7 +402,9 @@ void end_cb(const at::RecordFunction& /*fn*/, at::ObserverContext* obs_ctx)
 
 // Main-thread USER_SCOPE push. All-or-nothing: partial failures roll
 // back and rethrow so the Python caller can fall through to its tier.
-void push_user_scope(const std::string& marker, const std::string& context)
+// `backend`, when non-empty, is appended to the emitted range as
+// "|<backend>" so utils_profile._augment_marker_csv can attribute the row.
+void push_user_scope(const std::string& marker, const std::string& context, const std::string& backend)
 {
     bool pushed_to_stack  = false;
     bool pushed_to_guards = false;
@@ -430,7 +432,12 @@ void push_user_scope(const std::string& marker, const std::string& context)
         g_dbg_guards.push_back(std::move(guard));
         pushed_to_guards = true;
 
-        const std::string full = build_marker_string(g_stack);
+        std::string full = build_marker_string(g_stack);
+        if (!backend.empty())
+        {
+            full += '|';
+            full += backend;
+        }
         roctxRangePushA(full.c_str());
         pushed_roctx = true;
 
@@ -573,6 +580,7 @@ PYBIND11_MODULE(roctx_recordfn, m)
           &push_user_scope,
           pybind11::arg("marker"),
           pybind11::arg("context"),
+          pybind11::arg("backend") = std::string(""),
           "Push a USER_SCOPE frame, emit a ROCTX range, publish chain into TLS DebugInfo.");
     m.def("pop_user_scope", &pop_user_scope, "Pop the most recent push_user_scope() frame on this thread.");
     m.def("dump_stats", &dump_stats, "Internal counters for tests/debugging.");
