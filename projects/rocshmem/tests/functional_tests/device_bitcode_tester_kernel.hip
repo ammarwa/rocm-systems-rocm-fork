@@ -23,49 +23,9 @@
  *****************************************************************************/
 
 #include <hip/hip_runtime.h>
-#include <cstdint>
-#include <cstddef>
+#include <rocshmem/rocshmem.hpp>
 
-#define DECL_RMA(T, TNAME)                                              \
-  __device__ void rocshmem_##TNAME##_put(T*, const T*, size_t, int);    \
-  __device__ void rocshmem_##TNAME##_get(T*, const T*, size_t, int);
-
-#define DECL_RMA_WAVE(T, TNAME)                                         \
-  __device__ void rocshmem_##TNAME##_put_wave(T*, const T*, size_t, int);\
-  __device__ void rocshmem_##TNAME##_get_wave(T*, const T*, size_t, int);
-
-extern "C" {
-  __device__ int rocshmem_my_pe();
-  __device__ int rocshmem_n_pes();
-  __device__ void rocshmem_barrier_all();
-  __device__ void rocshmem_barrier_all_wave();
-  __device__ int rocshmem_int_sum_reduce_wg(int team, int *dest, const int *source, int nreduce);
-  __device__ void rocshmem_quiet();
-
-  __device__ void rocshmem_putmem(void*, const void*, size_t, int);
-  __device__ void rocshmem_getmem(void*, const void*, size_t, int);
-
-  __device__ void rocshmem_int_p(int*, int, int);
-  __device__ void rocshmem_int64_p(int64_t*, int64_t, int);
-
-  DECL_RMA(int, int)
-  DECL_RMA(float, float)
-  DECL_RMA_WAVE(int, int)
-
-  __device__ int64_t rocshmem_int64_atomic_fetch_add(int64_t*, int64_t, int);
-  __device__ int64_t rocshmem_int64_atomic_compare_swap(int64_t*, int64_t, int64_t, int);
-  __device__ int64_t rocshmem_int64_atomic_fetch(int64_t*, int);
-  __device__ void rocshmem_int64_atomic_set(int64_t*, int64_t, int);
-  __device__ int64_t rocshmem_int64_atomic_swap(int64_t*, int64_t, int);
-  __device__ uint64_t rocshmem_uint64_atomic_fetch_and(uint64_t*, uint64_t, int);
-  __device__ void rocshmem_uint64_atomic_and(uint64_t*, uint64_t, int);
-
-  __device__ void rocshmem_int_put_signal(int*, const int*, size_t,
-                                          uint64_t*, uint64_t, int, int);
-  __device__ void rocshmem_int_wait_until(int*, int, int);
-  __device__ size_t rocshmem_int_wait_until_any_vector(int*, size_t, const int*, int, int*);
-  __device__ void rocshmem_int_wait_until_all_vector(int*, size_t, const int*, int, int*);
-}
+using namespace rocshmem;
 
 extern "C" __global__ void test_pe_info(int *out_my_pe, int *out_n_pes) {
   if (threadIdx.x == 0 && blockIdx.x == 0) {
@@ -90,13 +50,11 @@ extern "C" __global__ void test_putmem_getmem(
     int next_pe = (my_pe + 1) % n_pes;
     int prev_pe = (my_pe - 1 + n_pes) % n_pes;
 
-    rocshmem_putmem(sym_dst, sym_src,
-                    count * sizeof(int), next_pe);
+    rocshmem_putmem(sym_dst, sym_src, count * sizeof(int), next_pe);
     rocshmem_quiet();
     rocshmem_barrier_all();
 
-    rocshmem_getmem(local_result, sym_src,
-                    count * sizeof(int), prev_pe);
+    rocshmem_getmem(local_result, sym_src, count * sizeof(int), prev_pe);
     rocshmem_quiet();
   }
 }
@@ -145,7 +103,7 @@ extern "C" __global__ void test_typed_atomic(
     rocshmem_barrier_all();
 
     int64_t swapped = rocshmem_int64_atomic_compare_swap(
-        sym_counter, 10, 999, my_pe);
+        sym_counter, 10LL, 999LL, my_pe);
     out_old[1] = swapped;
   }
 }
@@ -159,7 +117,7 @@ extern "C" __global__ void test_typed_put_signal(
 
     rocshmem_int_put_signal(
         sym_dst, sym_src, count,
-        sym_sig, 1, 0 /* ROCSHMEM_SIGNAL_SET */, next_pe);
+        sym_sig, 1, ROCSHMEM_SIGNAL_SET, next_pe);
     rocshmem_quiet();
     rocshmem_barrier_all();
   }
@@ -172,7 +130,7 @@ extern "C" __global__ void test_typed_wait_until(
     int next_pe = (my_pe + 1) % n_pes;
 
     rocshmem_int_p(sym_flag, my_pe + 1, next_pe);
-    rocshmem_int_wait_until(sym_flag, 1 /* ROCSHMEM_CMP_NE */, 0);
+    rocshmem_int_wait_until(sym_flag, ROCSHMEM_CMP_NE, 0);
   }
 }
 
@@ -185,14 +143,10 @@ extern "C" __global__ void test_typed_int_put_get_wave(
     int next_pe = (my_pe + 1) % n_pes;
     int prev_pe = (my_pe - 1 + n_pes) % n_pes;
 
-    // Restrict wave barrier participation to a single wave in the block.
-    // This avoids pSync protocol contention if launch geometry regresses to
-    // multi-wave blocks in the future.
     if (wf_id == 0) {
       rocshmem_int_put_wave(sym_dst, sym_src, count, next_pe);
       rocshmem_barrier_all_wave();
     }
-    // Keep sync outside conditionals so all block threads converge.
     __syncthreads();
 
     if (wf_id == 0) {
@@ -209,7 +163,7 @@ extern "C" __global__ void test_typed_amo_extended(
     int64_t fetched = rocshmem_int64_atomic_fetch(sym_val, my_pe);
     out_results[0] = fetched;
 
-    int64_t old = rocshmem_int64_atomic_swap(sym_val, 99, my_pe);
+    int64_t old = rocshmem_int64_atomic_swap(sym_val, 99LL, my_pe);
     out_results[1] = old;
 
     int64_t final_val = rocshmem_int64_atomic_fetch(sym_val, my_pe);
@@ -222,14 +176,14 @@ extern "C" __global__ void test_typed_amo_bitwise(
 {
   if (threadIdx.x == 0 && blockIdx.x == 0) {
     rocshmem_int64_atomic_set(reinterpret_cast<int64_t*>(sym_val), 0xFF, my_pe);
-    uint64_t old = rocshmem_uint64_atomic_fetch_and(sym_val, 0x0F, my_pe);
+    uint64_t old = rocshmem_uint64_atomic_fetch_and(sym_val, 0x0FUL, my_pe);
     out_results[0] = old;
 
     uint64_t after_and = rocshmem_int64_atomic_fetch(
         reinterpret_cast<int64_t*>(sym_val), my_pe);
     out_results[1] = after_and;
 
-    rocshmem_uint64_atomic_and(sym_val, 0x03, my_pe);
+    rocshmem_uint64_atomic_and(sym_val, 0x03UL, my_pe);
     uint64_t final_val = rocshmem_int64_atomic_fetch(
         reinterpret_cast<int64_t*>(sym_val), my_pe);
     out_results[2] = final_val;
@@ -257,20 +211,16 @@ extern "C" __global__ void test_typed_wait_vector(
     rocshmem_quiet();
 
     int vals[4] = {0, 0, 0, 0};
-    rocshmem_int_wait_until_any_vector(
-        sym_arr, count, nullptr, 1 /* CMP_NE */, vals);
-
-    rocshmem_int_wait_until_all_vector(
-        sym_arr, count, nullptr, 1 /* CMP_NE */, vals);
+    rocshmem_int_wait_until_any_vector(sym_arr, count, nullptr, ROCSHMEM_CMP_NE, vals);
+    rocshmem_int_wait_until_all_vector(sym_arr, count, nullptr, ROCSHMEM_CMP_NE, vals);
 
     *out_idx = 1;
   }
 }
 
-// All threads in the workgroup participate in the wg collective.
-// Source is pre-filled by the host (1 per PE); expected dest = n_pes after sum.
 extern "C" __global__ void test_int_sum_reduce(
-    int *sym_dest, int *sym_src, int nreduce, int team)
+    int *sym_dest, int *sym_src, int nreduce)
 {
-  rocshmem_int_sum_reduce_wg(team, sym_dest, sym_src, nreduce);
+  rocshmem_ctx_int_sum_reduce_wg(ROCSHMEM_CTX_DEFAULT, ROCSHMEM_TEAM_WORLD,
+                                 sym_dest, sym_src, nreduce);
 }

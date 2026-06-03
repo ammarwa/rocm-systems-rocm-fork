@@ -428,8 +428,7 @@ void DeviceBitcodeTester::execute() {
     rocshmem_barrier_all();
 
     int nreduce = COUNT;
-    int team = 0;
-    void* kargs[] = {&sym_dst, &sym_src, &nreduce, &team};
+    void* kargs[] = {&sym_dst, &sym_src, &nreduce};
     launch("test_int_sum_reduce", kargs);
     rocshmem_barrier_all();
 
