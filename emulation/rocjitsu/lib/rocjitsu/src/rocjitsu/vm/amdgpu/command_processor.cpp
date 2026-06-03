@@ -1198,6 +1198,8 @@ constexpr uint8_t OP_GCR = 17;
 constexpr uint8_t OP_HDP_FLUSH = 0x26; // GFX9 specific
 
 constexpr uint8_t SUBOP_COPY_LINEAR = 0;
+constexpr uint8_t SUBOP_FENCE_64B = 2;
+constexpr uint8_t SUBOP_POLL_MEM_64B = 5;
 
 // Packet sizes in dwords.
 constexpr uint32_t COPY_LINEAR_SIZE = 7;
@@ -1210,8 +1212,35 @@ constexpr uint32_t TIMESTAMP_SIZE = 3;
 constexpr uint32_t GCR_SIZE = 5;
 constexpr uint32_t GCR_GFX1250_SIZE = 6;
 constexpr uint32_t COPY_LINEAR_WAITSIGNAL_GFX1250_SIZE = 19;
+constexpr uint32_t FENCE_64B_GFX1250_SIZE = 5;
+constexpr uint32_t POLL_MEM_64B_GFX1250_SIZE = 8;
 // NOP_BASE_SIZE intentionally omitted — NOP is handled inline.
 } // namespace sdma
+
+namespace {
+
+bool sdma_compare_u64(uint32_t func, uint64_t value, uint64_t reference) {
+  switch (func) {
+  case 0:
+    return true;
+  case 1:
+    return value < reference;
+  case 2:
+    return value <= reference;
+  case 3:
+    return value == reference;
+  case 4:
+    return value != reference;
+  case 5:
+    return value >= reference;
+  case 6:
+    return value > reference;
+  default:
+    return true;
+  }
+}
+
+} // namespace
 
 void CommandProcessor::process_sdma_ring(HwQueue &queue, uint64_t read_idx, uint64_t write_idx) {
   auto *ring = reinterpret_cast<const uint32_t *>(queue.ring_base_va);
@@ -1246,6 +1275,30 @@ void CommandProcessor::process_sdma_ring(HwQueue &queue, uint64_t read_idx, uint
 
         constexpr uint32_t COPY_BASE = 8;
         constexpr uint32_t SIGNAL_BASE = 14;
+        bool has_wait = (header & (1u << 30)) != 0;
+        bool has_signal = (header & (1u << 31)) != 0;
+
+        if (has_wait) {
+          uint32_t wait_func = dw(1) & 0x7;
+          uint64_t wait_addr =
+              (static_cast<uint64_t>(dw(2) & ~0x7u)) | (static_cast<uint64_t>(dw(3)) << 32);
+          uint64_t wait_ref = static_cast<uint64_t>(dw(4)) | (static_cast<uint64_t>(dw(5)) << 32);
+          uint64_t wait_mask = static_cast<uint64_t>(dw(6)) | (static_cast<uint64_t>(dw(7)) << 32);
+          if (wait_addr > 0x1000) {
+            uint64_t wait_value =
+                std::atomic_ref<uint64_t>(*reinterpret_cast<uint64_t *>(wait_addr))
+                    .load(std::memory_order_acquire);
+            if (!sdma_compare_u64(wait_func, wait_value & wait_mask, wait_ref)) {
+              if (queue.host_accessible) {
+                std::atomic_ref<uint64_t>(*reinterpret_cast<uint64_t *>(queue.read_ptr_va))
+                    .store(rpos * sizeof(uint32_t), std::memory_order_release);
+              }
+              engine()->schedule_event_now(&doorbell_event_);
+              return;
+            }
+          }
+        }
+
         uint32_t count = (dw(COPY_BASE) & 0x3FFFFFFF) + 1;
         uint64_t src = static_cast<uint64_t>(dw(COPY_BASE + 2)) |
                        (static_cast<uint64_t>(dw(COPY_BASE + 3)) << 32);
@@ -1254,7 +1307,7 @@ void CommandProcessor::process_sdma_ring(HwQueue &queue, uint64_t read_idx, uint
 
         std::memcpy(reinterpret_cast<void *>(dst), reinterpret_cast<const void *>(src), count);
 
-        if (header & (1u << 31)) {
+        if (has_signal) {
           uint32_t signal_op = dw(SIGNAL_BASE) & 0x7F;
           uint64_t signal_addr = (static_cast<uint64_t>(dw(SIGNAL_BASE + 1) & ~0x7u)) |
                                  (static_cast<uint64_t>(dw(SIGNAL_BASE + 2)) << 32);
@@ -1302,6 +1355,22 @@ void CommandProcessor::process_sdma_ring(HwQueue &queue, uint64_t read_idx, uint
       break;
     }
     case sdma::OP_FENCE: {
+      if (gfx1250_sdma_packets_ && sub_op == sdma::SUBOP_FENCE_64B) {
+        if (rpos + sdma::FENCE_64B_GFX1250_SIZE > wpos) {
+          rpos = wpos;
+          continue;
+        }
+
+        uint64_t addr = static_cast<uint64_t>(dw(1) & ~0x7u) | (static_cast<uint64_t>(dw(2)) << 32);
+        uint64_t data = static_cast<uint64_t>(dw(3)) | (static_cast<uint64_t>(dw(4)) << 32);
+        if (addr > 0x1000) {
+          std::atomic_ref<uint64_t>(*reinterpret_cast<uint64_t *>(addr))
+              .store(data, std::memory_order_release);
+        }
+        pkt_dwords = sdma::FENCE_64B_GFX1250_SIZE;
+        break;
+      }
+
       uint64_t addr = static_cast<uint64_t>(dw(1)) | (static_cast<uint64_t>(dw(2)) << 32);
       uint32_t data = dw(3);
       std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t *>(addr))
@@ -1317,6 +1386,32 @@ void CommandProcessor::process_sdma_ring(HwQueue &queue, uint64_t read_idx, uint
       break;
     }
     case sdma::OP_POLL_REGMEM: {
+      if (gfx1250_sdma_packets_ && sub_op == sdma::SUBOP_POLL_MEM_64B) {
+        if (rpos + sdma::POLL_MEM_64B_GFX1250_SIZE > wpos) {
+          rpos = wpos;
+          continue;
+        }
+
+        uint32_t func = (header >> 28) & 0x7;
+        uint64_t addr = static_cast<uint64_t>(dw(1) & ~0x7u) | (static_cast<uint64_t>(dw(2)) << 32);
+        uint64_t ref = static_cast<uint64_t>(dw(3)) | (static_cast<uint64_t>(dw(4)) << 32);
+        uint64_t mask = static_cast<uint64_t>(dw(5)) | (static_cast<uint64_t>(dw(6)) << 32);
+        if (addr > 0x1000) {
+          auto *ptr = reinterpret_cast<uint64_t *>(addr);
+          uint64_t val = std::atomic_ref<uint64_t>(*ptr).load(std::memory_order_acquire);
+          if (!sdma_compare_u64(func, val & mask, ref)) {
+            if (queue.host_accessible) {
+              std::atomic_ref<uint64_t>(*reinterpret_cast<uint64_t *>(queue.read_ptr_va))
+                  .store(rpos * sizeof(uint32_t), std::memory_order_release);
+            }
+            engine()->schedule_event_now(&doorbell_event_);
+            return;
+          }
+        }
+        pkt_dwords = sdma::POLL_MEM_64B_GFX1250_SIZE;
+        break;
+      }
+
       bool mem_poll = (header >> 31) & 1;
       bool hdp_flush = (header >> 26) & 1;
       uint32_t func = (header >> 28) & 0x7;

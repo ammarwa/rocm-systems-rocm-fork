@@ -29,6 +29,7 @@ RJ_DIAGNOSTIC_POP
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cstdint>
 #include <cstdlib>
@@ -65,6 +66,10 @@ constexpr uint32_t S_SET_VGPR_MSB = 0xBF860000u;
 constexpr uint32_t kGfx1250ScalarSlots = 128;
 constexpr uint32_t kGfx1250Wave32VgprAllocation = 1024;
 constexpr uint32_t kGfx1250VgprEncodingGranule = 16;
+constexpr uint32_t kSdmaOpFence = 5;
+constexpr uint32_t kSdmaOpPollRegmem = 8;
+constexpr uint32_t kSdmaSubopFence64 = 2;
+constexpr uint32_t kSdmaSubopPollMem64 = 5;
 
 struct Gfx1250Sim {
   config::LoadedConfig loaded;
@@ -118,6 +123,54 @@ struct Gfx1250Sim {
     return addr;
   }
 };
+
+class HostSdmaQueueForTest {
+public:
+  explicit HostSdmaQueueForTest(Gfx1250Sim &sim) : sim_(sim) {
+    sim_.cp()->set_doorbell_base(doorbells_.data());
+
+    amdgpu::HwQueue queue{};
+    queue.queue_id = kQueueId;
+    queue.ring_base_va = reinterpret_cast<uint64_t>(ring_.data());
+    queue.ring_size = static_cast<uint32_t>(ring_.size() * sizeof(uint32_t));
+    queue.read_ptr_va = reinterpret_cast<uint64_t>(&read_idx_);
+    queue.write_ptr_va = reinterpret_cast<uint64_t>(&write_idx_);
+    queue.doorbell_offset = 0;
+    queue.host_accessible = true;
+    queue.is_sdma = true;
+    sim_.cp()->register_queue(std::move(queue));
+  }
+
+  ~HostSdmaQueueForTest() { sim_.cp()->unregister_queue(kQueueId); }
+
+  uint32_t *ring() { return ring_.data(); }
+
+  void submit(uint32_t dwords) {
+    uint64_t write_idx = static_cast<uint64_t>(dwords) * sizeof(uint32_t);
+    std::atomic_ref<uint64_t>(write_idx_).store(write_idx, std::memory_order_release);
+    std::atomic_ref<uint64_t>(doorbells_[0]).store(write_idx, std::memory_order_release);
+    sim_.engine->schedule_event_now(sim_.cp()->doorbell_event());
+  }
+
+  uint64_t read_idx() const {
+    return std::atomic_ref<const uint64_t>(read_idx_).load(std::memory_order_acquire);
+  }
+
+private:
+  static constexpr uint32_t kQueueId = 1250;
+
+  Gfx1250Sim &sim_;
+  std::array<uint32_t, 64> ring_{};
+  alignas(8) uint64_t read_idx_ = 0;
+  alignas(8) uint64_t write_idx_ = 0;
+  std::array<uint64_t, 1> doorbells_{};
+};
+
+void write_sdma_qword_address(uint32_t *packet, uint32_t lo_dw, uint32_t hi_dw, const void *addr) {
+  auto value = reinterpret_cast<uintptr_t>(addr);
+  packet[lo_dw] = static_cast<uint32_t>(value) & ~0x7u;
+  packet[hi_dw] = static_cast<uint32_t>(value >> 32);
+}
 
 void step_until_halted(simdojo::SimulationEngine &engine, amdgpu::ComputeUnitCore &cu,
                        uint32_t max_steps = 10000) {
@@ -344,6 +397,48 @@ TEST(Gfx1250ConfigTest, ConfigLoadsTopology) {
   EXPECT_EQ(cu->config().sgprs_per_wf, kGfx1250ScalarSlots);
   EXPECT_EQ(cu->config().vgprs_per_wf, kGfx1250Wave32VgprAllocation);
   EXPECT_EQ(soc->xcd(0)->command_processor()->vgpr_granularity(), kGfx1250VgprEncodingGranule);
+}
+
+TEST(Gfx1250SdmaTest, PollMem64WaitsForFull64BitCondition) {
+  Gfx1250Sim sim;
+  HostSdmaQueueForTest queue(sim);
+  alignas(8) uint64_t value = 1;
+
+  auto *packet = queue.ring();
+  packet[0] = kSdmaOpPollRegmem | (kSdmaSubopPollMem64 << 8) | (3u << 28); // 64-bit equal poll.
+  write_sdma_qword_address(packet, 1, 2, &value);
+  packet[3] = 0;
+  packet[4] = 0;
+  packet[5] = 0xFFFFFFFFu;
+  packet[6] = 0xFFFFFFFFu;
+  packet[7] = 0;
+
+  queue.submit(8);
+  ASSERT_TRUE(sim.engine->step());
+  EXPECT_EQ(queue.read_idx(), 0u);
+
+  std::atomic_ref<uint64_t>(value).store(0, std::memory_order_release);
+  sim.engine->schedule_event_now(sim.cp()->doorbell_event());
+  ASSERT_TRUE(sim.engine->step());
+  EXPECT_EQ(queue.read_idx(), 8u * sizeof(uint32_t));
+}
+
+TEST(Gfx1250SdmaTest, Fence64WritesFull64BitValue) {
+  Gfx1250Sim sim;
+  HostSdmaQueueForTest queue(sim);
+  alignas(8) uint64_t value = 0;
+  constexpr uint64_t kFenceValue = 0x12345678ABCDEF01ULL;
+
+  auto *packet = queue.ring();
+  packet[0] = kSdmaOpFence | (kSdmaSubopFence64 << 8) | (3u << 16);
+  write_sdma_qword_address(packet, 1, 2, &value);
+  packet[3] = static_cast<uint32_t>(kFenceValue);
+  packet[4] = static_cast<uint32_t>(kFenceValue >> 32);
+
+  queue.submit(5);
+  ASSERT_TRUE(sim.engine->step());
+  EXPECT_EQ(queue.read_idx(), 5u * sizeof(uint32_t));
+  EXPECT_EQ(std::atomic_ref<uint64_t>(value).load(std::memory_order_acquire), kFenceValue);
 }
 
 TEST(Gfx1250ExecutionTest, TensorDmaD2CopiesGlobalAndLds) {
